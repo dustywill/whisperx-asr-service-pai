@@ -40,6 +40,13 @@ services:
       - PRELOAD_MODEL=${PRELOAD_MODEL:-}
       - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-1000}
       - SERVE_MODE=${SERVE_MODE:-simple}
+      - VOICE_LIBRARY_PATH=${VOICE_LIBRARY_PATH:-/data/voices.json}
+      - VOICE_CLIPS_DIR=${VOICE_CLIPS_DIR:-/data/voices}
+      - EMBEDDING_MAX_CLIP_SECONDS=${EMBEDDING_MAX_CLIP_SECONDS:-30}
+      - MAX_REFERENCES_PER_NAME=${MAX_REFERENCES_PER_NAME:-50}
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-1}
+      - VOICE_LOCK_STRATEGY=${VOICE_LOCK_STRATEGY:-asyncio}
+      - PAI_VOICES_SKIP_PROBE=${PAI_VOICES_SKIP_PROBE:-}
       - PIPELINE_STRATEGY=${PIPELINE_STRATEGY:-replicate}
       - WHISPER_BATCH_SIZE=${WHISPER_BATCH_SIZE:-4}
       - ALIGN_BATCH_SIZE=${ALIGN_BATCH_SIZE:-8}
@@ -57,10 +64,12 @@ services:
     volumes:
       # Persistent cache for models (recommended)
       - whisperx-cache:/.cache
+      - whisperx-data:/data
 
       # Mount local app directory for live code changes during development
       - ./app:/workspace/app
       - ./entrypoint.sh:/workspace/entrypoint.sh
+      - ./docker-entrypoint-pai.sh:/workspace/docker-entrypoint-pai.sh
 
     healthcheck:
       test: ["CMD", "python3", "-c", "import requests; requests.get('http://localhost:9000/health')"]
@@ -78,4 +87,6 @@ services:
 
 volumes:
   whisperx-cache:
+    driver: local
+  whisperx-data:
     driver: local

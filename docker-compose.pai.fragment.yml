@@ -3,7 +3,7 @@
 # Source: PRD 20260421-204500_whisperx-asr-service-voice-endpoints (ISC-39).
 #
 # This replaces the upstream `learnedmachine/whisperx-asr-service:latest` service.
-# The `/data` bind mount MUST be the same host directory that the queue app
+# The `/data` mount MUST be the same shared named volume the queue app
 # (parent PRD 20260421-202617) mounts, because this server writes
 # /data/voices.json and /data/voices/{name}/clip-*.wav and the queue worker
 # reads voices.json for cosine matching.
@@ -29,7 +29,7 @@ services:
       # PAI_VOICES_SKIP_PROBE: "0"
     volumes:
       # SHARED with the queue app's /data mount — both services read voices.json.
-      - /srv/pai/voice-data:/data
+      - transcription-data:/data
     deploy:
       resources:
         reservations:
@@ -43,3 +43,7 @@ services:
       timeout: 10s
       start_period: 60s
       retries: 3
+
+volumes:
+  transcription-data:
+    external: true

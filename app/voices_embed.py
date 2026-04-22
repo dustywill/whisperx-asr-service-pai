@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import logging
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import List, Tuple
 
@@ -19,6 +20,19 @@ logger = logging.getLogger(__name__)
 
 MODEL_VERSION = "pyannote/speaker-diarization-community-1"
 TARGET_SAMPLE_RATE = 16000
+
+
+def _synthetic_probe_audio() -> np.ndarray:
+    """Generate a short voiced-like clip for startup validation fallback."""
+    t = np.linspace(0.0, 1.0, TARGET_SAMPLE_RATE, endpoint=False, dtype=np.float32)
+    signal = (
+        0.18 * np.sin(2 * np.pi * 220.0 * t)
+        + 0.09 * np.sin(2 * np.pi * 440.0 * t)
+        + 0.04 * np.sin(2 * np.pi * 660.0 * t)
+    )
+    fade = np.minimum(t / 0.05, (1.0 - t) / 0.05)
+    fade = np.clip(fade, 0.0, 1.0).astype(np.float32)
+    return (signal * fade).astype(np.float32)
 
 
 def probe_clip_duration(audio_bytes: bytes) -> float:
@@ -66,23 +80,46 @@ def extract_embedding(pipeline, audio_np: np.ndarray) -> List[float]:
     the queue app is responsible for slicing per-speaker reference clips before
     calling /embed (parent PRD worker-stage S6).
     """
-    import torch  # local import: heavy dep
-
-    waveform = torch.from_numpy(audio_np).float()
-    if waveform.ndim == 1:
-        waveform = waveform.unsqueeze(0)  # [1, T]
-    diarize_out = pipeline(
-        {"waveform": waveform, "sample_rate": TARGET_SAMPLE_RATE},
-        return_embeddings=True,
-    )
+    # whisperx.diarize.DiarizationPipeline expects a raw mono waveform array.
+    # It wraps this into the pyannote dict shape internally.
+    diarize_out = pipeline(audio_np, return_embeddings=True)
     if not (isinstance(diarize_out, tuple) and len(diarize_out) == 2):
         raise RuntimeError("diarization pipeline did not return embeddings tuple")
     _, embeds = diarize_out
-    if not embeds:
-        raise RuntimeError("diarization produced no speakers")
-    first_key = next(iter(embeds))
-    vec = np.asarray(embeds[first_key]).flatten()
+    vec = _first_embedding_vector(embeds)
     return [float(x) for x in vec.tolist()]
+
+
+def _first_embedding_vector(embeds) -> np.ndarray:
+    """Extract the first speaker vector from the shapes pyannote may return.
+
+    Different pyannote / whisperx combinations may surface speaker embeddings as
+    a dict-like mapping, a 2D ndarray/torch tensor, or a wrapper object with a
+    `.data` ndarray. Normalize all of them here so both `/embed` and the
+    startup probe share one compatibility shim.
+    """
+    if embeds is None:
+        raise RuntimeError("diarization produced no speaker embeddings")
+
+    if hasattr(embeds, "detach"):
+        embeds = embeds.detach().cpu().numpy()
+
+    if isinstance(embeds, Mapping):
+        if not embeds:
+            raise RuntimeError("diarization produced no speakers")
+        first_key = next(iter(embeds))
+        return np.asarray(embeds[first_key]).flatten()
+
+    if hasattr(embeds, "data"):
+        data = np.asarray(embeds.data)
+        if data.size == 0:
+            raise RuntimeError("diarization produced no speakers")
+        return data[0].flatten() if data.ndim > 1 else data.flatten()
+
+    data = np.asarray(embeds)
+    if data.size == 0:
+        raise RuntimeError("diarization produced no speakers")
+    return data[0].flatten() if data.ndim > 1 else data.flatten()
 
 
 def run_startup_probe(pipeline_loader, embed_fn=extract_embedding) -> Tuple[int, float]:
@@ -90,15 +127,24 @@ def run_startup_probe(pipeline_loader, embed_fn=extract_embedding) -> Tuple[int,
 
     Raises RuntimeError if norm is below epsilon — catches silent model-load drift.
     """
-    silence = np.zeros(TARGET_SAMPLE_RATE, dtype=np.float32)
     pipeline = pipeline_loader()
-    vec = embed_fn(pipeline, silence)
+    try:
+        vec = embed_fn(pipeline, np.zeros(TARGET_SAMPLE_RATE, dtype=np.float32))
+        probe_kind = "silence"
+    except RuntimeError as exc:
+        if "no speakers" not in str(exc).lower():
+            raise
+        logger.warning(
+            "[pai-voices] startup silence probe produced no speakers; retrying with synthetic voiced probe"
+        )
+        vec = embed_fn(pipeline, _synthetic_probe_audio())
+        probe_kind = "synthetic"
     dim = len(vec)
     norm = float(np.linalg.norm(vec))
     if norm < 1e-6:
         raise RuntimeError(f"startup probe: embedding norm {norm} below threshold")
     logger.info(
-        "[pai-voices] startup embedding probe OK dim=%d norm=%.4f model=%s",
-        dim, norm, MODEL_VERSION,
+        "[pai-voices] startup embedding probe OK kind=%s dim=%d norm=%.4f model=%s",
+        probe_kind, dim, norm, MODEL_VERSION,
     )
     return dim, norm

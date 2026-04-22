@@ -20,6 +20,27 @@ A simple ASR API service powered by WhisperX for transcription with speaker diar
 - Outputs JSON, SRT, VTT, TSV formats
 - Runs on your own GPU hardware via Docker
 
+## PAI Fork Additions
+
+This fork adds two routes used by the PAI transcription queue:
+
+- `POST /embed` returns a speaker embedding for an uploaded clip.
+- `POST /voices/{name}` stores a reference clip plus embedding under a normalized speaker name.
+
+The fork also adds a startup embedding probe, `/health` gating until that probe passes, and `/data/voices.json` plus `/data/voices/{name}/clip-*.wav` as the shared voice-library contract.
+
+## PAI Build Metrics
+
+Captured on each SemVer release via `docker images --format "{{.Size}}"` on the build host.
+
+| Tag | Compressed image size | Built on | Build host |
+|---------------|------------------------|----------|------------|
+| `0.1.0` | _TBD (first build on TutelarAlien pending)_ | _pending_ | tutelaralien |
+
+## PAI Release Policy
+
+Every deploy-worthy build gets a SemVer tag first (`dustywill/whisperx-asr-service-pai:0.x.y`). Re-point `:latest` only after the integration smoke test passes on that exact tagged image.
+
 ## Limitations
 
 - **Not production-grade**: Basic error handling, no authentication

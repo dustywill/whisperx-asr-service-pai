@@ -85,3 +85,17 @@ Throughput:
 ```
 
 The **Speedup** metric shows how much faster concurrent processing is compared to sequential -- a value close to `NUM_GPU_REPLICAS` indicates good GPU utilization.
+
+## Live PAI Smoke
+
+`test_integration_live.py` is skipped by default and is meant for a real deployed
+PAI fork host.
+
+```bash
+set RUN_E2E=1
+set PAI_LIVE_BASE_URL=http://tutelaralien:9000
+set PAI_LIVE_AUDIO_FILE=C:\path\to\reference.wav
+py -3 -m pytest tests/test_integration_live.py -q
+```
+
+Expect `/health` to be `200` and `/embed` to return a non-zero embedding vector.

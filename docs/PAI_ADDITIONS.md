@@ -103,6 +103,6 @@ Every deploy-worthy build gets a SemVer tag first (`dustywill/whisperx-asr-servi
    docker tag dustywill/whisperx-asr-service-pai:0.1.0 dustywill/whisperx-asr-service-pai:latest
    docker push dustywill/whisperx-asr-service-pai:latest
    ```
-3. Merge `docker-compose.pai.fragment.yml` into TutelarAlien's stack; ensure the host `/srv/pai/voice-data` (or whatever host path you choose) is the same mount point the queue app uses.
+3. Merge `docker-compose.pai.fragment.yml` into TutelarAlien's stack; ensure both the queue app and this service mount the same external named volume `transcription-data` at `/data`.
 4. `docker compose up -d whisperx-asr`
 5. `curl http://tutelaralien:9000/health` — expect 503 for a few seconds, then 200.

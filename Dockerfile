@@ -52,7 +52,9 @@ RUN pip3 install --no-cache-dir \
     "ray[serve]>=2.9"
 
 # PAI fork additions: Unicode-property-aware regex for name validation.
-RUN pip3 install --no-cache-dir regex==2024.11.6
+# Keep this compatible with the transformers version pulled in by the
+# pyannote/lightning stack.
+RUN pip3 install --no-cache-dir "regex>=2025.10.22"
 
 # Pre-download NLTK data for timestamp alignment (enables offline use)
 RUN python3 -c "import nltk; nltk.download('punkt_tab', download_dir='/.cache/nltk_data')"
@@ -67,7 +69,8 @@ COPY app /workspace/app
 # Copy entrypoint scripts (upstream + PAI wrapper)
 COPY entrypoint.sh /workspace/entrypoint.sh
 COPY docker-entrypoint-pai.sh /workspace/docker-entrypoint-pai.sh
-RUN chmod +x /workspace/entrypoint.sh /workspace/docker-entrypoint-pai.sh
+RUN sed -i 's/\r$//' /workspace/entrypoint.sh /workspace/docker-entrypoint-pai.sh \
+ && chmod +x /workspace/entrypoint.sh /workspace/docker-entrypoint-pai.sh
 
 # PAI fork: non-root user matching parent-PRD volume ownership convention.
 # /data owns the voice library; /.cache and /workspace must stay writable.
