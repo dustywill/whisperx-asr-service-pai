@@ -29,6 +29,8 @@ from app.pipeline import (
     _whisper_models as loaded_models,
 )
 from app.queue import run_in_queue, get_queue_metrics
+from app.voices import router as voices_router
+from app.voices_embed import run_startup_probe
 
 # Suppress pyannote pooling warnings about degrees of freedom
 warnings.filterwarnings("ignore", message=".*degrees of freedom is <= 0.*")
@@ -55,9 +57,15 @@ logger.info(f"Compute type: {COMPUTE_TYPE}, Batch size: {BATCH_SIZE}")
 logger.info(f"Default model: {DEFAULT_MODEL}, Serve mode: {SERVE_MODE}")
 
 
+# PAI fork: /health stays red until this flips true via the startup probe.
+_VOICES_PROBE_PASSED: bool = False
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Preload models on startup"""
+    """Preload models on startup + run pai-voices embedding probe."""
+    global _VOICES_PROBE_PASSED
+
     preload_model = os.getenv("PRELOAD_MODEL", None)
     if preload_model:
         logger.info(f"Preloading model on startup: {preload_model}")
@@ -66,6 +74,23 @@ async def startup_event():
             logger.info(f"Successfully preloaded model: {preload_model}")
         except Exception as e:
             logger.error(f"Failed to preload model {preload_model}: {str(e)}")
+
+    # PAI fork: verify the diarization pipeline can actually emit an embedding
+    # before accepting /embed or /voices/{name} traffic. Gates /health to 503
+    # until the probe passes. Opt out with PAI_VOICES_SKIP_PROBE=1 (used in tests
+    # and in minimal CI environments without HF_TOKEN).
+    if os.getenv("PAI_VOICES_SKIP_PROBE") == "1":
+        logger.warning("[pai-voices] startup probe skipped (PAI_VOICES_SKIP_PROBE=1)")
+        _VOICES_PROBE_PASSED = True
+        return
+    try:
+        from app.pipeline import load_diarize_pipeline
+
+        run_startup_probe(load_diarize_pipeline)
+        _VOICES_PROBE_PASSED = True
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[pai-voices] startup embedding probe FAILED: {e}")
+        # Leave _VOICES_PROBE_PASSED False so /health returns 503.
 
 
 @app.get("/")
@@ -250,7 +275,18 @@ async def transcribe_audio(
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for monitoring"""
+    """Health check endpoint for monitoring.
+
+    PAI fork: returns 503 until the startup embedding probe has passed.
+    """
+    if not _VOICES_PROBE_PASSED:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "starting",
+                "detail": "pai-voices embedding probe has not passed yet",
+            },
+        )
     return {
         "status": "healthy",
         "device": DEVICE,
@@ -277,6 +313,9 @@ async def metrics():
 from app.openai_compat import router as openai_router, models_router
 app.include_router(openai_router)
 app.include_router(models_router)
+
+# PAI fork: mount /embed and /voices/{name}.
+app.include_router(voices_router)
 
 
 if __name__ == "__main__":

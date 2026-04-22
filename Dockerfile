@@ -51,6 +51,9 @@ RUN pip3 install --no-cache-dir \
     pydantic==2.5.0 \
     "ray[serve]>=2.9"
 
+# PAI fork additions: Unicode-property-aware regex for name validation.
+RUN pip3 install --no-cache-dir regex==2024.11.6
+
 # Pre-download NLTK data for timestamp alignment (enables offline use)
 RUN python3 -c "import nltk; nltk.download('punkt_tab', download_dir='/.cache/nltk_data')"
 ENV NLTK_DATA=/.cache/nltk_data
@@ -61,18 +64,26 @@ RUN mkdir -p /.cache && chmod 777 /.cache
 # Copy application code
 COPY app /workspace/app
 
-# Copy entrypoint script
+# Copy entrypoint scripts (upstream + PAI wrapper)
 COPY entrypoint.sh /workspace/entrypoint.sh
-RUN chmod +x /workspace/entrypoint.sh
+COPY docker-entrypoint-pai.sh /workspace/docker-entrypoint-pai.sh
+RUN chmod +x /workspace/entrypoint.sh /workspace/docker-entrypoint-pai.sh
+
+# PAI fork: non-root user matching parent-PRD volume ownership convention.
+# /data owns the voice library; /.cache and /workspace must stay writable.
+RUN groupadd -g 1000 pai && useradd -u 1000 -g 1000 -m -s /bin/bash pai \
+ && mkdir -p /data && chown -R 1000:1000 /data /.cache /workspace
+USER 1000:1000
 
 # Expose API port (9000) and Ray dashboard (8265)
 EXPOSE 9000 8265
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python3 -c "import requests; requests.get('http://localhost:9000/health')" || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python3 -c "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:9000/health',timeout=2).status==200 else sys.exit(1)" || exit 1
 
 # Default: simple mode (uvicorn). Set SERVE_MODE=ray for Ray Serve.
 ENV SERVE_MODE=simple
 
-CMD ["/workspace/entrypoint.sh"]
+# PAI fork: entrypoint validates HF_TOKEN + worker count, then hands off to upstream.
+CMD ["/workspace/docker-entrypoint-pai.sh"]

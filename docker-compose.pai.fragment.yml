@@ -1,0 +1,45 @@
+# Fragment to merge into the tutelaralien stack's compose file.
+# Target host: tutelaralien.
+# Source: PRD 20260421-204500_whisperx-asr-service-voice-endpoints (ISC-39).
+#
+# This replaces the upstream `learnedmachine/whisperx-asr-service:latest` service.
+# The `/data` bind mount MUST be the same host directory that the queue app
+# (parent PRD 20260421-202617) mounts, because this server writes
+# /data/voices.json and /data/voices/{name}/clip-*.wav and the queue worker
+# reads voices.json for cosine matching.
+
+services:
+  whisperx-asr:
+    image: dustywill/whisperx-asr-service-pai:latest
+    container_name: whisperx-asr
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "9000:9000"
+    environment:
+      HF_TOKEN: "${HF_TOKEN}"
+      SERVE_MODE: simple
+      UVICORN_WORKERS: "1"
+      VOICE_LIBRARY_PATH: /data/voices.json
+      VOICE_CLIPS_DIR: /data/voices
+      EMBEDDING_MAX_CLIP_SECONDS: "30"
+      MAX_REFERENCES_PER_NAME: "50"
+      VOICE_LOCK_STRATEGY: asyncio
+      # Set to "1" only in CI / no-HF smoke environments.
+      # PAI_VOICES_SKIP_PROBE: "0"
+    volumes:
+      # SHARED with the queue app's /data mount — both services read voices.json.
+      - /srv/pai/voice-data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:9000/health',timeout=2).status==200 else sys.exit(1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
