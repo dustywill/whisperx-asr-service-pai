@@ -79,6 +79,14 @@ Our changes live on branch `pai-main` (not `pai/main` — slashes in branch name
 
 Then push with `--force-with-lease` (never `--force`).
 
+## Build metrics
+
+Captured on each SemVer release via `docker images --format "{{.Size}}"` on the build host.
+
+| Tag | Compressed image size | Built on | Build host |
+|---|---|---|---|
+| `0.1.0` | _TBD (first build on TutelarAlien pending)_ | _pending_ | tutelaralien |
+
 ## Release policy
 
 Every deploy-worthy build gets a SemVer tag first (`dustywill/whisperx-asr-service-pai:0.x.y`). `:latest` is only re-pointed after the integration smoke test passes on that tag. Build metrics (compressed layer size) are captured in the main README under **Build metrics**.
