@@ -73,6 +73,7 @@ def test_health_returns_503_when_probe_has_not_passed(monkeypatch, tmp_voice_dir
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("PAI_VOICES_SKIP_PROBE", "0")
+    monkeypatch.setenv("PAI_VOICES_PROBE_RETRY_SEC", "3600")
 
     # Force a fresh import of app.main so startup re-runs with the new env
     # *and* fails — by making the pipeline loader raise inside the probe.
@@ -93,7 +94,10 @@ def test_health_returns_503_when_probe_has_not_passed(monkeypatch, tmp_voice_dir
     with TestClient(fresh_app) as tc:
         # Sanity: probe should have failed, leaving flag False.
         assert main_mod._VOICES_PROBE_PASSED is False
+        assert main_mod._VOICES_PROBE_RETRY_TASK is not None
         resp = tc.get("/health")
         assert resp.status_code == 503, resp.text
         body = resp.json()
         assert body.get("status") == "starting"
+        assert body.get("probe_error") == "no pyannote in test env"
+        assert body.get("probe_attempts") == 1

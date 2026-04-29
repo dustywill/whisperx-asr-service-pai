@@ -92,6 +92,58 @@ def test_embed_undecodable_audio_returns_422(client, fake_embedder, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# Silent-audio handling (regression: previously 500'd with
+# "diarization produced no speakers")
+# ---------------------------------------------------------------------------
+
+
+def test_embed_silent_zero_pcm_returns_200_with_null_embedding(client, fake_embedder, monkeypatch):
+    """A fully-zero (silent) waveform must NOT 500. Returns 200 with
+    `embedding: null` and `reason: silent_audio` so callers can branch."""
+    import numpy as np
+
+    from app import voices as voices_mod
+    from app import voices_embed as emb_mod
+
+    silent = np.zeros(16000, dtype=np.float32)
+    monkeypatch.setattr(voices_mod, "decode_to_mono_16k", lambda b: silent)
+    monkeypatch.setattr(emb_mod, "decode_to_mono_16k", lambda b: silent)
+
+    # Ensure pipeline isn't called for silent input — fail loudly if it is.
+    def _should_not_be_called(*a, **kw):
+        raise AssertionError("extract_embedding must not run on silent audio")
+
+    monkeypatch.setattr(voices_mod, "extract_embedding", _should_not_be_called)
+    monkeypatch.setattr(emb_mod, "extract_embedding", _should_not_be_called)
+
+    resp = client.post("/embed", files=_audio_upload())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["embedding"] is None
+    assert body["reason"] == "silent_audio"
+    assert body["dim"] == 0
+    assert "model_version" in body
+
+
+def test_embed_pipeline_no_speakers_runtime_error_is_treated_as_silent(client, fake_embedder, monkeypatch):
+    """Defense in depth: if the pipeline itself raises 'no speakers'
+    (e.g., low-energy speech that pyannote rejects), surface as silent_audio
+    rather than 500."""
+    from app import voices as voices_mod
+
+    def boom(_pipeline, _audio):
+        raise RuntimeError("diarization produced no speakers")
+
+    monkeypatch.setattr(voices_mod, "extract_embedding", boom)
+
+    resp = client.post("/embed", files=_audio_upload())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["embedding"] is None
+    assert body["reason"] == "silent_audio"
+
+
+# ---------------------------------------------------------------------------
 # Pipeline reuse (ISC-8)
 # ---------------------------------------------------------------------------
 

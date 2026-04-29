@@ -121,7 +121,7 @@ def fake_embedder(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         emb_mod,
         "decode_to_mono_16k",
-        lambda audio_bytes: np.zeros(16000, dtype=np.float32),
+        lambda audio_bytes: np.full(16000, 0.1, dtype=np.float32),
     )
     monkeypatch.setattr(emb_mod, "probe_clip_duration", lambda audio_bytes: 1.0)
 
@@ -137,7 +137,7 @@ def fake_embedder(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         voices_mod,
         "decode_to_mono_16k",
-        lambda audio_bytes: np.zeros(16000, dtype=np.float32),
+        lambda audio_bytes: np.full(16000, 0.1, dtype=np.float32),
     )
     monkeypatch.setattr(voices_mod, "probe_clip_duration", lambda audio_bytes: 1.0)
 

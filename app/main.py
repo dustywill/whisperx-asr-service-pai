@@ -3,6 +3,7 @@ WhisperX ASR API Service
 Compatible with openai-whisper-asr-webservice API endpoints
 """
 
+import asyncio
 import os
 import tempfile
 import logging
@@ -10,7 +11,7 @@ import warnings
 from typing import Optional
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, Query, HTTPException
+from fastapi import FastAPI, File, UploadFile, Query, HTTPException, Request
 from fastapi.responses import JSONResponse
 import whisperx
 
@@ -59,12 +60,54 @@ logger.info(f"Default model: {DEFAULT_MODEL}, Serve mode: {SERVE_MODE}")
 
 # PAI fork: /health stays red until this flips true via the startup probe.
 _VOICES_PROBE_PASSED: bool = False
+_VOICES_PROBE_LAST_ERROR: str | None = None
+_VOICES_PROBE_RETRY_TASK: asyncio.Task | None = None
+_VOICES_PROBE_ATTEMPTS: int = 0
+
+
+def _voices_probe_retry_delay_seconds() -> float:
+    return max(1.0, float(os.getenv("PAI_VOICES_PROBE_RETRY_SEC", "30")))
+
+
+async def _run_voices_probe_once() -> bool:
+    """Try the embedding probe once and update shared health state."""
+    global _VOICES_PROBE_PASSED, _VOICES_PROBE_LAST_ERROR, _VOICES_PROBE_ATTEMPTS
+
+    _VOICES_PROBE_ATTEMPTS += 1
+    attempt = _VOICES_PROBE_ATTEMPTS
+    logger.info("[pai-voices] startup embedding probe attempt=%d", attempt)
+    try:
+        from app.pipeline import load_diarize_pipeline
+
+        await asyncio.to_thread(run_startup_probe, load_diarize_pipeline)
+        _VOICES_PROBE_PASSED = True
+        _VOICES_PROBE_LAST_ERROR = None
+        logger.info("[pai-voices] startup embedding probe marked ready attempt=%d", attempt)
+        return True
+    except Exception as e:  # noqa: BLE001
+        _VOICES_PROBE_PASSED = False
+        _VOICES_PROBE_LAST_ERROR = str(e)
+        logger.error("[pai-voices] startup embedding probe FAILED attempt=%d error=%s", attempt, e)
+        return False
+
+
+async def _retry_voices_probe_until_ready() -> None:
+    """Keep retrying the startup probe until it succeeds."""
+    global _VOICES_PROBE_RETRY_TASK
+
+    delay = _voices_probe_retry_delay_seconds()
+    while not _VOICES_PROBE_PASSED:
+        logger.warning("[pai-voices] retrying startup embedding probe in %.1fs", delay)
+        await asyncio.sleep(delay)
+        if await _run_voices_probe_once():
+            break
+    _VOICES_PROBE_RETRY_TASK = None
 
 
 @app.on_event("startup")
 async def startup_event():
     """Preload models on startup + run pai-voices embedding probe."""
-    global _VOICES_PROBE_PASSED
+    global _VOICES_PROBE_PASSED, _VOICES_PROBE_LAST_ERROR, _VOICES_PROBE_RETRY_TASK
 
     preload_model = os.getenv("PRELOAD_MODEL", None)
     if preload_model:
@@ -82,15 +125,21 @@ async def startup_event():
     if os.getenv("PAI_VOICES_SKIP_PROBE") == "1":
         logger.warning("[pai-voices] startup probe skipped (PAI_VOICES_SKIP_PROBE=1)")
         _VOICES_PROBE_PASSED = True
+        _VOICES_PROBE_LAST_ERROR = None
         return
-    try:
-        from app.pipeline import load_diarize_pipeline
+    if await _run_voices_probe_once():
+        return
+    if _VOICES_PROBE_RETRY_TASK is None or _VOICES_PROBE_RETRY_TASK.done():
+        _VOICES_PROBE_RETRY_TASK = asyncio.create_task(_retry_voices_probe_until_ready())
 
-        run_startup_probe(load_diarize_pipeline)
-        _VOICES_PROBE_PASSED = True
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"[pai-voices] startup embedding probe FAILED: {e}")
-        # Leave _VOICES_PROBE_PASSED False so /health returns 503.
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cancel the background probe retry task when the app stops."""
+    global _VOICES_PROBE_RETRY_TASK
+    if _VOICES_PROBE_RETRY_TASK is not None:
+        _VOICES_PROBE_RETRY_TASK.cancel()
+        _VOICES_PROBE_RETRY_TASK = None
 
 
 @app.get("/")
@@ -107,6 +156,7 @@ async def root():
 
 @app.post("/asr")
 async def transcribe_audio(
+    request: Request,
     audio_file: UploadFile = File(...),
     task: str = Query("transcribe"),
     language: Optional[str] = Query(None),
@@ -174,7 +224,18 @@ async def transcribe_audio(
         if file_size_mb > 100:
             logger.warning(f"Processing large file ({file_size_mb:.1f}MB) - may consume significant VRAM")
 
-        logger.info(f"Processing audio file: {audio_file.filename} ({file_size_mb:.1f}MB), model: {model}, language: {language}")
+        client_host = request.client.host if request.client else "unknown"
+        logger.info(
+            "ASR request start client=%s file=%s size_mb=%.1f model=%s language=%s diarize=%s output=%s embeddings=%s",
+            client_host,
+            audio_file.filename,
+            file_size_mb,
+            model,
+            language,
+            should_diarize,
+            output_format,
+            return_speaker_embeddings,
+        )
 
         # Load audio
         audio = whisperx.load_audio(temp_audio_path)
@@ -211,6 +272,13 @@ async def transcribe_audio(
                 response_data["speaker_embeddings"] = sanitize_float_values(speaker_embeddings)
                 logger.info(f"Including speaker embeddings in response: {list(speaker_embeddings.keys())}")
 
+            logger.info(
+                "ASR request complete client=%s file=%s segments=%d language=%s",
+                client_host,
+                audio_file.filename,
+                len(result.get("segments", [])),
+                detected_language,
+            )
             return JSONResponse(content=response_data)
 
         elif output_format == "text":
@@ -262,7 +330,12 @@ async def transcribe_audio(
             raise HTTPException(status_code=400, detail=f"Unsupported output format: {output_format}")
 
     except Exception as e:
-        logger.error(f"Transcription error: {str(e)}", exc_info=True)
+        logger.error(
+            "ASR request failed file=%s error=%s",
+            audio_file.filename,
+            str(e),
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
@@ -285,6 +358,8 @@ async def health_check():
             content={
                 "status": "starting",
                 "detail": "pai-voices embedding probe has not passed yet",
+                "probe_attempts": _VOICES_PROBE_ATTEMPTS,
+                "probe_error": _VOICES_PROBE_LAST_ERROR,
             },
         )
     return {
@@ -292,6 +367,7 @@ async def health_check():
         "device": DEVICE,
         "loaded_models": list(loaded_models.keys()),
         "serve_mode": SERVE_MODE,
+        "probe_attempts": _VOICES_PROBE_ATTEMPTS,
     }
 
 

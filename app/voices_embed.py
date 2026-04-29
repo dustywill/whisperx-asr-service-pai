@@ -6,8 +6,9 @@ importing the heavy pyannote/whisperx stack.
 
 from __future__ import annotations
 
-import io
 import logging
+import json
+import subprocess
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,6 +21,26 @@ logger = logging.getLogger(__name__)
 
 MODEL_VERSION = "pyannote/speaker-diarization-community-1"
 TARGET_SAMPLE_RATE = 16000
+
+# RMS amplitude below this is treated as silent (~ -50 dBFS for float32 PCM in
+# [-1, 1]). Used to short-circuit /embed before invoking the diarization
+# pipeline, which raises on all-silence input.
+SILENCE_RMS_THRESHOLD = 0.003
+
+
+def is_silent(audio_np: np.ndarray, threshold: float = SILENCE_RMS_THRESHOLD) -> bool:
+    """Return True if the waveform's RMS is below `threshold`.
+
+    Operates on the same mono float32 16 kHz array produced by
+    `decode_to_mono_16k`. Empty arrays count as silent.
+    """
+    if audio_np is None:
+        return True
+    arr = np.asarray(audio_np, dtype=np.float32).ravel()
+    if arr.size == 0:
+        return True
+    rms = float(np.sqrt(np.mean(np.square(arr))))
+    return rms < threshold
 
 
 def _synthetic_probe_audio() -> np.ndarray:
@@ -38,19 +59,59 @@ def _synthetic_probe_audio() -> np.ndarray:
 def probe_clip_duration(audio_bytes: bytes) -> float:
     """Return clip duration in seconds without fully decoding.
 
-    Uses soundfile.info() on a tempfile so the multipart upload path stays bounded.
+    Prefer ffprobe because ffmpeg is already part of the service image.
+    Fall back to soundfile when ffprobe cannot inspect the upload.
     """
-    import soundfile as sf  # local import: heavy dep
-
     with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
         tmp.write(audio_bytes)
         tmp.flush()
         tmp_path = tmp.name
     try:
-        info = sf.info(tmp_path)
-        return float(info.frames) / float(info.samplerate)
+        try:
+            return _probe_duration_ffprobe(tmp_path)
+        except Exception as ffprobe_exc:  # noqa: BLE001
+            logger.warning("ffprobe duration probe failed; falling back to soundfile: %s", ffprobe_exc)
+            return _probe_duration_soundfile(tmp_path)
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def _probe_duration_ffprobe(tmp_path: str) -> float:
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            tmp_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"ffprobe exit {proc.returncode}"
+        raise RuntimeError(detail)
+    payload = json.loads(proc.stdout or "{}")
+    duration_raw = payload.get("format", {}).get("duration")
+    if duration_raw in (None, ""):
+        raise RuntimeError("ffprobe returned no duration")
+    duration = float(duration_raw)
+    if duration <= 0:
+        raise RuntimeError(f"ffprobe returned non-positive duration {duration}")
+    return duration
+
+
+def _probe_duration_soundfile(tmp_path: str) -> float:
+    import soundfile as sf  # local import: optional fallback
+
+    info = sf.info(tmp_path)
+    if not info.samplerate:
+        raise RuntimeError("soundfile returned samplerate 0")
+    return float(info.frames) / float(info.samplerate)
 
 
 def decode_to_mono_16k(audio_bytes: bytes) -> np.ndarray:
