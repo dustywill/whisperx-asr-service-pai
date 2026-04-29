@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 env:
-  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/whisperx-asr-service
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/whisperx-asr-service-pai
 
 jobs:
   build-and-push:
